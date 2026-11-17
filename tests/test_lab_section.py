@@ -1,11 +1,16 @@
-"""Проверки модели сечения: канал в блоке и полуканал у окна из оргстекла."""
+"""Проверки модели сечения: канал в блоке, полуканал у окна из оргстекла, полный контур 360°."""
+
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from saltcav.core.lab_config import LabConfig
+from saltcav.core.lab_config import LabConfig, load_lab_config
+from saltcav.geometry import geometry, wall_speed_factor
 from saltcav.leaching.axisym import simulate_lab
 from saltcav.leaching.section import simulate_section
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _cfg(**kw: object) -> LabConfig:
@@ -34,7 +39,7 @@ def test_salt_balance(setup: str) -> None:
 
 def test_without_gravity_reduces_to_simple_model() -> None:
     """Без гравитации сечение круглое и результат равен простой модели."""
-    sec = simulate_section(_cfg(natural_convection=False))
+    sec = simulate_section(_cfg(natural_convection=False, stefan_condition=False))
     simple = simulate_lab(_cfg(model="axisym", natural_convection=False))
     r = sec.radius[-1]
     assert np.ptp(r, axis=1).max() <= 1e-12 * r.max()
@@ -126,3 +131,95 @@ def test_wall_cooling_small() -> None:
 def test_axisym_rejects_window() -> None:
     with pytest.raises(ValueError):
         _cfg(model="axisym", setup="window", natural_convection=False)
+
+
+# ---- режим full: полный контур 0…360° ----
+
+
+def test_full_contour_is_periodic_and_symmetric() -> None:
+    """Однородный материал: контур замкнут (θ=2π ≡ 0) и зеркален относительно вертикали."""
+    res = simulate_section(_cfg(setup="full", n_theta=24))
+    r = res.radius[-1]
+    assert res.theta[-1] == pytest.approx(2.0 * np.pi)
+    assert res.halves == 1
+    assert np.max(np.abs(r[:, 0] - r[:, -1])) <= 1e-9 * r.max()
+    assert np.max(np.abs(r - r[:, ::-1])) <= 1e-6 * r.max()
+
+
+def test_full_matches_channel() -> None:
+    """Без неоднородностей полный контур даёт тот же объём и концентрацию, что половина ×2."""
+    kw = {"n_theta": 24}
+    half = simulate_section(_cfg(**kw))
+    full = simulate_section(_cfg(setup="full", **kw))
+    assert full.volume[-1] == pytest.approx(half.volume[-1], rel=0.05)
+    assert full.outlet_concentration[-1] == pytest.approx(half.outlet_concentration[-1], rel=0.05)
+    roof, _, floor = full.by_part[-1]
+    assert roof > floor
+
+
+def test_full_salt_balance() -> None:
+    res = simulate_section(_cfg(setup="full", n_theta=24))
+    assert res.dissolved[-1] > 0
+    assert abs(_balance(res)) <= 1e-9 * res.dissolved[-1]
+    assert sum(res.by_part[-1]) == pytest.approx(res.dissolved[-1], rel=1e-9)
+
+
+def test_full_height_is_roof_plus_floor() -> None:
+    """Высота сечения в режиме 360° — потолок + дно (θ=π), а не потолок + потолок."""
+    theta = np.linspace(0.0, 2.0 * np.pi, 25)
+    r = np.full((5, 25), 2e-3)
+    r[:, 0] = r[:, -1] = 3e-3  # потолок выше дна
+    g = geometry(r, 1e-3, theta, window=False)
+    assert g.height == pytest.approx(np.full(4, 0.5 * (3e-3 + 3e-3) + 0.5 * (2e-3 + 2e-3)), rel=0.2)
+    assert np.all(g.height < 2.0 * 3e-3 - 1e-6)
+
+
+def test_full_requires_n_theta_multiple_of_4() -> None:
+    with pytest.raises(ValueError, match="кратно 4"):
+        _cfg(setup="full", n_theta=10)
+
+
+def test_axisym_rejects_full() -> None:
+    with pytest.raises(ValueError, match="axisym"):
+        _cfg(model="axisym", setup="full", natural_convection=False, n_theta=12)
+
+
+def test_wall_speed_factor_periodic_has_no_seam() -> None:
+    """Периодическая схема не создаёт шва: гладкое возмущение в районе θ=0 симметрично."""
+    theta = np.linspace(0.0, 2.0 * np.pi, 49)
+    r = 2e-3 * (1.0 + 0.1 * np.cos(theta))  # гладкий замкнутый контур
+    f = wall_speed_factor(np.tile(r, (5, 1)), 1e-3, theta[1] - theta[0], periodic=True)
+    assert f[:, 0] == pytest.approx(f[:, -1])
+    assert np.max(np.abs(f[:, 1] - f[:, -2])) <= 1e-9
+
+
+# ---- условие Стефана и множитель материала ----
+
+
+def test_stefan_condition_speeds_up_wall() -> None:
+    """V = j/(ρ_s − C_s) быстрее V = j/ρ_s: каверна больше, но не более чем в ρ_s/(ρ_s − C_s)."""
+    on = simulate_section(_cfg(natural_convection=False))
+    off = simulate_section(_cfg(natural_convection=False, stefan_condition=False))
+    ratio = on.volume[-1] / off.volume[-1]
+    assert 1.05 < ratio < 2160.0 / (2160.0 - on.c_sat) * 1.05
+
+
+def test_material_multiplier_scales_dissolution() -> None:
+    """Множитель 1 ничего не меняет, множитель 0,5 растворяет заметно меньше."""
+    base = simulate_section(_cfg(setup="full", n_theta=12, natural_convection=False))
+    one = simulate_section(
+        _cfg(setup="full", n_theta=12, natural_convection=False),
+        material_multiplier=lambda r: np.ones_like(r),
+    )
+    half = simulate_section(
+        _cfg(setup="full", n_theta=12, natural_convection=False),
+        material_multiplier=lambda r: np.full_like(r, 0.5),
+    )
+    assert one.volume[-1] == pytest.approx(base.volume[-1], rel=1e-12)
+    assert half.volume[-1] < 0.8 * base.volume[-1]
+
+
+def test_full_yaml_example_loads() -> None:
+    path = ROOT / "configs" / "full.yaml"
+    cfg = load_lab_config(path)
+    assert cfg.setup == "full" and cfg.n_theta % 4 == 0

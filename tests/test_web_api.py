@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import threading
-import time
-import urllib.request
 import urllib.error
+import urllib.request
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 
 import pytest
 
-from saltcav.web.server import SaltcavRequestHandler, get_default_config_dict
+from saltcav.web.server import SaltcavRequestHandler
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +35,7 @@ def test_get_defaults(live_server: str) -> None:
         data = json.loads(resp.read().decode("utf-8"))
         assert data["status"] == "ok"
         cfg = data["config"]
-        assert cfg["setup"] in ("channel", "window")
+        assert cfg["setup"] in ("channel", "window", "full")
         assert cfg["length_mm"] > 0
         assert len(cfg["stages"]) >= 1
 
@@ -74,6 +73,9 @@ def test_post_simulate_success(live_server: str) -> None:
         res = json.loads(resp.read().decode("utf-8"))
         assert res["status"] == "ok"
         d = res["data"]
+        assert d["config"]["name"] == payload["name"]
+        assert d["config"]["stages"] == payload["stages"]
+        assert d["config"]["depth_m"] == 0
         assert d["n_steps"] > 0
         assert len(d["times"]) == d["n_steps"]
         assert len(d["x_mm"]) == 11  # n_cells + 1
@@ -81,6 +83,64 @@ def test_post_simulate_success(live_server: str) -> None:
         assert len(d["radius_mm"]) == d["n_steps"]
         assert "metrics" in d
         assert len(d["metrics"]["volume_cm3"]) == d["n_steps"]
+
+
+def test_post_simulate_full_contour(live_server: str) -> None:
+    """Режим full: замкнутый контур 0…2π и условие Стефана доходят до модели."""
+    payload = {
+        "name": "test-web-full",
+        "setup": "full",
+        "model": "section",
+        "natural_convection": True,
+        "length_mm": 40.0,
+        "diameter_mm": 4.0,
+        "max_radius_mm": 20.0,
+        "n_cells": 8,
+        "n_theta": 12,
+        "output_every_min": 15.0,
+        "stefan_condition": True,
+        "stages": [{"duration_h": 0.25, "flow_ml_min": 1.0, "inlet_saturation": 0.0}],
+    }
+    req = urllib.request.Request(
+        f"{live_server}/api/simulate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        d = json.loads(resp.read().decode("utf-8"))["data"]
+    assert len(d["theta_rad"]) == 13
+    assert d["theta_rad"][-1] == pytest.approx(2 * 3.141592653589793, abs=1e-3)
+    assert d["halves"] == 1
+
+
+def test_post_simulate_with_tube_pockets(live_server: str) -> None:
+    """Заход трубок: ось x уходит в отрицательные значения, расчётная область расширена."""
+    payload = {
+        "name": "test-web-tubes",
+        "setup": "full",
+        "model": "section",
+        "length_mm": 40.0,
+        "diameter_mm": 4.0,
+        "max_radius_mm": 20.0,
+        "n_cells": 16,
+        "n_theta": 12,
+        "output_every_min": 15.0,
+        "tube_insert_mm": 5.0,
+        "tube_gap_mm": 0.1,
+        "pocket_exchange_mult": 10.0,
+        "stages": [{"duration_h": 0.25, "flow_ml_min": 1.0, "inlet_saturation": 0.0}],
+    }
+    req = urllib.request.Request(
+        f"{live_server}/api/simulate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        d = json.loads(resp.read().decode("utf-8"))["data"]
+    assert d["n_pocket"] == 2
+    assert d["x_mm"][0] == pytest.approx(-5.0)
+    assert d["x_mm"][-1] == pytest.approx(45.0)
+    assert len(d["radius_mm"][-1]) == len(d["x_mm"])
 
 
 def test_post_simulate_invalid_config(live_server: str) -> None:
@@ -103,11 +163,10 @@ def test_post_simulate_invalid_config(live_server: str) -> None:
 
 
 def test_static_files_served(live_server: str) -> None:
-    """Статические файлы index.html, style.css, app.js успешно отдаются."""
-    for path in ["/", "/index.html", "/style.css", "/app.js"]:
+    """Статические файлы index.html, style.css, app.js, report.js успешно отдаются."""
+    for path in ["/", "/index.html", "/style.css", "/app.js", "/report.js"]:
         url = f"{live_server}{path}"
         with urllib.request.urlopen(url) as resp:
             assert resp.status == HTTPStatus.OK
             content = resp.read()
             assert len(content) > 0
-

@@ -33,9 +33,11 @@ class LabConfig(_Strict):
 
     name: Annotated[str, Field(description="Название опыта")] = "lab-channel"
     setup: Annotated[
-        Literal["channel", "window"],
-        Field(description="channel — канал в целом блоке; window — полуканал у вертикального "
-                          "окна из оргстекла (половина каверны, видна через стекло)"),
+        Literal["channel", "window", "full"],
+        Field(description="channel — канал в целом блоке (считается половина, вторая зеркальная); "
+                          "window — полуканал у вертикального окна из оргстекла (половина "
+                          "каверны, видна через стекло); full — канал в целом блоке, весь "
+                          "контур 0…360° без допущения о симметрии"),
     ] = "channel"
     length_mm: Annotated[float, Field(gt=0, description="Длина канала (блока вдоль оси), мм")]
     diameter_mm: Annotated[float, Field(gt=0, description="Начальный диаметр канала, мм")]
@@ -79,6 +81,29 @@ class LabConfig(_Strict):
     natural_convection: Annotated[
         bool, Field(description="Учитывать свободную конвекцию и расслоение рассола")
     ] = True
+    tube_insert_mm: Annotated[
+        float,
+        Field(ge=0, description="Заход подающей и отводящей трубок в отверстие, мм. Каверна "
+                                "растворяется от x = −заход до x = L + заход, а вода входит в "
+                                "x = 0 и выходит в x = L (трубка непроницаема). 0 — трубок нет"),
+    ] = 0.0
+    tube_gap_mm: Annotated[
+        float,
+        Field(gt=0, description="Радиальный зазор между трубкой и стенкой отверстия, мм "
+                                "(наружный радиус трубки = D₀/2 − зазор)"),
+    ] = 0.1
+    pocket_exchange_mult: Annotated[
+        float,
+        Field(ge=0, description="Множитель обмена рассолом между карманом у трубки и "
+                                "рабочим участком (1 — молекулярная диффузия через зазор; "
+                                "калибруется по опытам)"),
+    ] = 1.0
+    stefan_condition: Annotated[
+        bool,
+        Field(description="Условие Стефана на границе соли: скорость отступания стенки "
+                          "V = j/(ρ_s − C_s) вместо V = j/ρ_s (быстрее в ρ_s/(ρ_s − C_s) ≈ 1,17 "
+                          "раза). Только модель сечения; выключено — прежняя скорость"),
+    ] = True
     sh_mult: Annotated[
         float, Field(gt=0, description="Калибровочный множитель массоотдачи (по опытам)")
     ] = 1.0
@@ -102,20 +127,40 @@ class LabConfig(_Strict):
                                        "охлаждения стенки теплотой растворения"),
     ] = 6.0
     n_cells: Annotated[int, Field(ge=4, description="Число ячеек вдоль оси")] = 100
-    n_theta: Annotated[int, Field(ge=4, description="Секторов по углу на половину сечения")] = 18
+    n_theta: Annotated[
+        int,
+        Field(
+            ge=4,
+            description="Секторов по углу на половину сечения (full — на весь контур "
+            "0…360°, кратно 4)",
+        ),
+    ] = 18
     output_every_min: Annotated[float, Field(gt=0, description="Шаг записи, мин")] = 10.0
     cfl: Annotated[float, Field(gt=0, le=1, description="Запас по условию Куранта")] = 0.5
     stages: Annotated[list[LabStage], Field(min_length=1, description="Режим насоса")]
 
     @model_validator(mode="after")
     def _check_model(self) -> LabConfig:
-        if self.model == "axisym" and (self.setup == "window" or self.natural_convection):
+        if self.model == "axisym" and (self.setup != "channel" or self.natural_convection):
             raise ValueError("model: axisym — только setup: channel и natural_convection: false")
+        if self.tube_insert_mm > 0 and self.model != "section":
+            raise ValueError("tube_insert_mm — только для model: section")
+        if self.tube_gap_mm >= 0.5 * self.diameter_mm:
+            raise ValueError("tube_gap_mm должен быть меньше радиуса канала")
+        if self.setup == "full" and self.n_theta % 4:
+            raise ValueError("setup: full — n_theta кратно 4 (узлы бока θ=90° и дна θ=180°)")
         if self.model == "axisym" and self.depth_m > 0:
             raise ValueError("model: axisym — только для установки на поверхности (depth_m: 0)")
         if self.temperature_at_depth > 100:
             raise ValueError("температура на глубине выше 100 °C — вне таблиц свойств рассола")
         return self
+
+    @property
+    def n_pocket(self) -> int:
+        """Ячеек кармана у каждой трубки (заход трубки в целых ячейках по x, 0 — без трубок)."""
+        if self.tube_insert_mm <= 0:
+            return 0
+        return max(1, round(self.tube_insert_mm / (self.length_mm / self.n_cells)))
 
     @property
     def temperature_at_depth(self) -> float:

@@ -30,6 +30,7 @@ const DOM = {
   stagesTableBody: document.getElementById("stagesTableBody"),
   btnAddStage: document.getElementById("btnAddStage"),
   btnRun: document.getElementById("btnRunSimulation"),
+  btnReport: document.getElementById("btnDownloadReport"),
   errorBanner: document.getElementById("formErrorMessage"),
 
   // Плеер
@@ -90,9 +91,21 @@ function renderFormulas() {
 
 function bindEvents() {
   DOM.form.addEventListener("submit", onFormSubmit);
+  DOM.btnReport.addEventListener("click", () => {
+    if (!state.simData) return;
+    const content = buildLabReport(state.simData, state.view.xIndex);
+    const url = URL.createObjectURL(new Blob([content], { type: "text/html;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "saltcav-lab-report.html";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
   DOM.btnReset.addEventListener("click", () => loadDefaults());
   DOM.btnAddStage.addEventListener("click", () => addStageRow(1.0, 10.0, 0.0));
   DOM.presetSelect.addEventListener("change", onPresetChange);
+  DOM.presetSelect.addEventListener("change", syncSetupFields);
+  syncSetupFields();
 
   // Плеер
   DOM.btnPlayPause.addEventListener("click", togglePlay);
@@ -208,6 +221,14 @@ function populateForm(cfg) {
   document.getElementById("roofMult").value = cfg.roof_mult ?? 1.0;
   document.getElementById("wallMult").value = cfg.wall_mult ?? 1.0;
   document.getElementById("naturalConvection").checked = cfg.natural_convection !== false;
+  document.getElementById("nCells").value = cfg.n_cells ?? 80;
+  document.getElementById("nTheta").value = cfg.n_theta ?? 18;
+  document.getElementById("shMult").value = cfg.sh_mult ?? 1.0;
+  document.getElementById("outputEveryMin").value = cfg.output_every_min ?? 2.0;
+  document.getElementById("stefanCondition").checked = cfg.stefan_condition !== false;
+  document.getElementById("tubeInsertMm").value = cfg.tube_insert_mm ?? 0;
+  document.getElementById("tubeGapMm").value = cfg.tube_gap_mm ?? 0.1;
+  document.getElementById("pocketExchange").value = cfg.pocket_exchange_mult ?? 1.0;
 
   DOM.stagesTableBody.innerHTML = "";
   const stages = cfg.stages || [
@@ -271,12 +292,34 @@ function collectFormData() {
     salt_density_kg_m3: parseFloat(document.getElementById("saltDensity").value),
     roof_mult: parseFloat(document.getElementById("roofMult").value),
     wall_mult: parseFloat(document.getElementById("wallMult").value),
-    sh_mult: 1.0,
-    n_cells: 80,
-    n_theta: 18,
-    output_every_min: 2.0,
+    sh_mult: parseFloat(document.getElementById("shMult").value),
+    n_cells: parseInt(document.getElementById("nCells").value, 10),
+    n_theta: parseInt(document.getElementById("nTheta").value, 10),
+    output_every_min: parseFloat(document.getElementById("outputEveryMin").value),
+    stefan_condition: document.getElementById("stefanCondition").checked,
+    tube_insert_mm: parseFloat(document.getElementById("tubeInsertMm").value),
+    tube_gap_mm: parseFloat(document.getElementById("tubeGapMm").value),
+    pocket_exchange_mult: parseFloat(document.getElementById("pocketExchange").value),
     stages: stages,
   };
+}
+
+// Полный контур 0…2π (setup: full): без зеркала, дно — узел θ = π (середина), а не последний.
+function isClosedContour(theta) {
+  return theta[theta.length - 1] > Math.PI * 1.5;
+}
+function floorIndex(theta) {
+  return isClosedContour(theta) ? (theta.length - 1) / 2 : theta.length - 1;
+}
+
+
+// Поля, зависящие от режима: материал и кратность n_theta — только для full.
+function syncSetupFields() {
+  const full = DOM.presetSelect.value === "full";
+  document.getElementById("nThetaHint").textContent = full ? "(на весь контур, кратно 4)" : "(на половину)";
+  const nt = document.getElementById("nTheta");
+  nt.step = full ? 4 : 1;
+  if (full && nt.value % 4 !== 0) nt.value = Math.max(4, Math.round(nt.value / 4) * 4);
 }
 
 async function onFormSubmit(e) {
@@ -305,6 +348,7 @@ async function runSimulation() {
     }
 
     state.simData = json.data;
+    DOM.btnReport.disabled = false;
     onSimulationSuccess();
   } catch (err) {
     console.error("Simulation error:", err);
@@ -442,12 +486,18 @@ function updateTimeAndMetrics(stepIdx) {
   // Статистика конкретного сечения
   const rSlice = d.radius_mm[stepIdx][state.view.xIndex];
   const rTop = rSlice[0]; // theta = 0
-  const rBot = rSlice[rSlice.length - 1]; // theta = pi
+  const rBot = rSlice[floorIndex(d.theta_rad)]; // theta = pi
   // Максимальная ширина (вдоль горизонтали)
   let maxW = 0;
-  for (let j = 0; j < d.theta_rad.length; j++) {
-    const w = 2.0 * rSlice[j] * Math.sin(d.theta_rad[j]);
-    if (w > maxW) maxW = w;
+  if (isClosedContour(d.theta_rad)) {
+    // полный контур: ширина = размах по горизонтали (с учётом несимметрии)
+    const ys = Array.from(rSlice, (rv, j) => rv * Math.sin(d.theta_rad[j]));
+    maxW = Math.max(...ys) - Math.min(...ys);
+  } else {
+    for (let j = 0; j < d.theta_rad.length; j++) {
+      const w = 2.0 * rSlice[j] * Math.sin(d.theta_rad[j]);
+      if (w > maxW) maxW = w;
+    }
   }
   DOM.valRoofR.textContent = `${rTop.toFixed(2)} мм`;
   DOM.valFloorR.textContent = `${rBot.toFixed(2)} мм`;
@@ -568,6 +618,7 @@ function renderCrossSection(canvas, stepIdx, xIdx) {
   // 3. Текущая граница каверны r(theta)
   const ptsRight = [];
   const ptsLeft = [];
+  const closed = isClosedContour(theta);
 
   for (let j = 0; j < theta.length; j++) {
     const th = theta[j];
@@ -576,7 +627,7 @@ function renderCrossSection(canvas, stepIdx, xIdx) {
     const py = -r * Math.cos(th); // -cos дает вверх для th = 0
 
     ptsRight.push({ x: cx + px, y: cy + py });
-    if (th > 0 && th < Math.PI) {
+    if (!closed && th > 0 && th < Math.PI) {
       ptsLeft.unshift({ x: cx - px, y: cy + py }); // зеркальная левая половина
     }
   }
@@ -602,7 +653,8 @@ function renderCrossSection(canvas, stepIdx, xIdx) {
   ctx.fillStyle = "#2B608A";
   ctx.beginPath();
   ctx.arc(ptsRight[0].x, ptsRight[0].y, 3.5, 0, 2 * Math.PI);
-  ctx.arc(ptsRight[ptsRight.length - 1].x, ptsRight[ptsRight.length - 1].y, 3.5, 0, 2 * Math.PI);
+  const fl = ptsRight[closed ? floorIndex(theta) : ptsRight.length - 1];
+  ctx.arc(fl.x, fl.y, 3.5, 0, 2 * Math.PI);
   ctx.fill();
 
   ctx.restore();
@@ -630,7 +682,9 @@ function renderLongitudinal(canvas, stepIdx, currentXIdx) {
   const usableW = W - padLeft - padRight;
   const usableH = H - 2 * padY;
 
-  const totalLength = d.x_mm[nx - 1];
+  // ось x: от конца левого кармана (x < 0, если трубки заходят в отверстие) до конца правого
+  const xMin = d.x_mm[0];
+  const totalLength = d.x_mm[nx - 1] - xMin;
   const maxR = d.max_radius_mm || Math.max(...d.radius_mm[d.n_steps - 1].flat()) * 1.2;
 
   const scaleX = usableW / totalLength;
@@ -652,8 +706,8 @@ function renderLongitudinal(canvas, stepIdx, currentXIdx) {
   ctx.fillStyle = "#8494A0";
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
-  for (let xm = 0; xm <= totalLength; xm += xStep) {
-    const px = padLeft + xm * scaleX;
+  for (let xm = Math.ceil(xMin / xStep) * xStep; xm <= xMin + totalLength; xm += xStep) {
+    const px = padLeft + (xm - xMin) * scaleX;
     ctx.beginPath();
     ctx.moveTo(px, midY - 3);
     ctx.lineTo(px, midY + 3);
@@ -679,9 +733,9 @@ function renderLongitudinal(canvas, stepIdx, currentXIdx) {
   const floorPts = [];
 
   for (let i = 0; i < nx; i++) {
-    const px = padLeft + d.x_mm[i] * scaleX;
+    const px = padLeft + (d.x_mm[i] - xMin) * scaleX;
     const rRoof = stepData[i][0]; // theta = 0
-    const rFloor = stepData[i][stepData[i].length - 1]; // theta = pi
+    const rFloor = stepData[i][floorIndex(d.theta_rad)]; // theta = pi
 
     roofPts.push({ x: px, y: midY - rRoof * scaleZ });
     floorPts.push({ x: px, y: midY + rFloor * scaleZ });
@@ -710,8 +764,32 @@ function renderLongitudinal(canvas, stepIdx, currentXIdx) {
   for (let i = 1; i < floorPts.length; i++) ctx.lineTo(floorPts[i].x, floorPts[i].y);
   ctx.stroke();
 
+  // Трубки в карманах: непроницаемые, вода входит в x = 0 и выходит в x = L
+  if (d.n_pocket > 0) {
+    const rTube = initialR - (d.config.tube_gap_mm || 0);
+    const xIn = padLeft + (0 - xMin) * scaleX;
+    const xOut = padLeft + (d.config.length_mm - xMin) * scaleX;
+    ctx.fillStyle = "rgba(120,130,140,0.35)";
+    ctx.fillRect(padLeft, midY - rTube * scaleZ, xIn - padLeft, 2 * rTube * scaleZ);
+    ctx.fillRect(xOut, midY - rTube * scaleZ, padLeft + usableW - xOut, 2 * rTube * scaleZ);
+    ctx.strokeStyle = "#8494A0";
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xIn, padY);
+    ctx.lineTo(xIn, H - padY);
+    ctx.moveTo(xOut, padY);
+    ctx.lineTo(xOut, H - padY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#8494A0";
+    ctx.textAlign = "center";
+    ctx.fillText("вход", xIn, padY - 6);
+    ctx.fillText("выход", xOut, padY - 6);
+  }
+
   // 4. Вертикальный маркер (визир) выбранного сечения X
-  const markerX = padLeft + d.x_mm[currentXIdx] * scaleX;
+  const markerX = padLeft + (d.x_mm[currentXIdx] - xMin) * scaleX;
   ctx.strokeStyle = "#2B608A";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
