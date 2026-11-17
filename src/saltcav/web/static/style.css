@@ -166,8 +166,8 @@ html, body {
 
 /* Сайдбар */
 .sidebar {
-  flex: 0 0 330px;
-  width: 330px;
+  flex: 0 0 350px;
+  width: 350px;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -240,6 +240,13 @@ html, body {
 label {
   font-size: 0.72rem;
   color: var(--text-muted);
+}
+
+.hint {
+  font-size: 0.65rem;
+  color: var(--text-light);
+  font-weight: 400;
+  text-transform: none;
 }
 
 input[type="text"],
@@ -329,6 +336,9 @@ select.form-select:focus {
 
 /* Кнопки */
 .form-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   flex-shrink: 0;
   padding-top: 4px;
 }
@@ -379,6 +389,25 @@ select.form-select:focus {
 
 .btn-secondary:hover {
   background-color: var(--salt-pink-light);
+}
+
+.btn-secondary.btn-report {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 0.74rem;
+  letter-spacing: 0.4px;
+}
+
+.btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: var(--border-color-dark);
+  color: var(--text-light);
+  background-color: var(--bg-subtle);
 }
 
 .btn-text {
@@ -483,8 +512,8 @@ select.form-select:focus {
 }
 
 .btn-player.active {
-  background-color: #2A2A2A;
-  border-color: #2A2A2A;
+  background-color: var(--salt-red-primary);
+  border-color: var(--salt-red-primary);
   color: #FFFFFF;
 }
 

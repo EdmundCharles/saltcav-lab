@@ -327,7 +327,15 @@ async function onFormSubmit(e) {
   await runSimulation();
 }
 
+let currentSimAbortController = null;
+
 async function runSimulation() {
+  if (currentSimAbortController) {
+    currentSimAbortController.abort();
+  }
+  currentSimAbortController = new AbortController();
+  const { signal } = currentSimAbortController;
+
   if (state.playback.isPlaying) pause();
   DOM.errorBanner.classList.add("hidden");
   DOM.btnRun.disabled = true;
@@ -340,6 +348,7 @@ async function runSimulation() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
     });
 
     const json = await res.json();
@@ -351,12 +360,18 @@ async function runSimulation() {
     DOM.btnReport.disabled = false;
     onSimulationSuccess();
   } catch (err) {
+    if (err.name === "AbortError") {
+      // Предыдущий запрос был штатно отменен новым запуском
+      return;
+    }
     console.error("Simulation error:", err);
     DOM.errorBanner.textContent = err.message;
     DOM.errorBanner.classList.remove("hidden");
     setStatus("error", "Ошибка расчёта");
   } finally {
-    DOM.btnRun.disabled = false;
+    if (currentSimAbortController && currentSimAbortController.signal === signal) {
+      DOM.btnRun.disabled = false;
+    }
   }
 }
 

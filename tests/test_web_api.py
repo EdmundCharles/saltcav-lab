@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import socket
 import urllib.error
 import urllib.request
 from http import HTTPStatus
@@ -11,13 +12,13 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from saltcav.web.server import SaltcavRequestHandler
+from saltcav.web.server import SaltcavHTTPServer, SaltcavRequestHandler
 
 
 @pytest.fixture(scope="module")
 def live_server():
     """Запустить тестовый HTTP-сервер на свободном порту."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), SaltcavRequestHandler)
+    server = SaltcavHTTPServer(("127.0.0.1", 0), SaltcavRequestHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -170,3 +171,45 @@ def test_static_files_served(live_server: str) -> None:
             assert resp.status == HTTPStatus.OK
             content = resp.read()
             assert len(content) > 0
+
+
+def test_favicon_served(live_server: str) -> None:
+    """Запрос /favicon.ico возвращает 200 OK или 204 No Content (без 404 ошибки)."""
+    url = f"{live_server}/favicon.ico"
+    with urllib.request.urlopen(url) as resp:
+        assert resp.status in (HTTPStatus.OK, HTTPStatus.NO_CONTENT)
+
+
+def test_client_disconnect_does_not_crash_server(live_server: str) -> None:
+    """Обрыв соединения клиентом (BrokenPipeError) не роняет сервер."""
+    host, port_str = live_server.replace("http://", "").split(":")
+    port = int(port_str)
+
+    payload = json.dumps({
+        "name": "test-abort",
+        "setup": "channel",
+        "model": "section",
+        "length_mm": 50.0,
+        "diameter_mm": 2.5,
+        "stages": [{"duration_h": 0.1, "flow_ml_min": 10.0, "inlet_saturation": 0.0}],
+    }).encode("utf-8")
+
+    # Отправляем POST и резко закрываем TCP-сокет без чтения ответа
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host, port))
+    req_data = (
+        f"POST /api/simulate HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("utf-8") + payload
+    s.sendall(req_data)
+    s.close()  # Имитация закрытия вкладки / сброса соединения клиентом
+
+    # Сервер должен остаться полностью работоспособным и обслужить следующий запрос
+    with urllib.request.urlopen(f"{live_server}/api/defaults") as resp:
+        assert resp.status == HTTPStatus.OK
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["status"] == "ok"
+

@@ -101,6 +101,13 @@ class SaltcavRequestHandler(SimpleHTTPRequestHandler):
             self.handle_get_defaults()
             return
 
+        if path == "/favicon.ico":
+            favicon_path = STATIC_DIR / "favicon.ico"
+            if not favicon_path.exists():
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+                return
+
         if path == "/" or path == "":
             self.path = "/index.html"
 
@@ -212,18 +219,35 @@ class SaltcavRequestHandler(SimpleHTTPRequestHandler):
         self.send_json_response(HTTPStatus.OK, response_data)
 
     def send_json_response(self, status: HTTPStatus, data: dict[str, Any]) -> None:
-        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            # Клиент закрыл соединение до завершения передачи (обновил страницу или отменил запрос)
+            pass
+
+
+class SaltcavHTTPServer(ThreadingHTTPServer):
+    """Многопоточный HTTP-сервер с корректной обработкой разрывов соединений клиентом."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc_type, _, _ = sys.exc_info()
+        if exc_type in (BrokenPipeError, ConnectionResetError):
+            # Штатный обрыв со стороны клиента: не засоряем консоль трейсбеком
+            return
+        super().handle_error(request, client_address)
 
 
 def launch_server(host: str = "127.0.0.1", port: int = 8080) -> None:
     """Запустить сервер локально."""
     server_address = (host, port)
-    httpd = ThreadingHTTPServer(server_address, SaltcavRequestHandler)
+    httpd = SaltcavHTTPServer(server_address, SaltcavRequestHandler)
     print(f"==================================================")
     print(f"  SALTCAV LAB Web Server запущен!")
     print(f"  Адрес: http://{host}:{port}")
