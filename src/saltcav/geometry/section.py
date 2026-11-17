@@ -1,4 +1,4 @@
-"""Геометрия сечения лабораторного канала r(θ, x).
+"""Геометрия сечения лабораторного канала r(θ, x): объёмы клиньев, нормали, периметр.
 
 Угол θ отсчитывается от вертикали вверх: θ = 0 — потолок, θ = 90° — бок, θ = 180° — дно.
 Считается половина сечения θ ∈ [0, π]; для ``setup: window`` к смоченному периметру
@@ -48,11 +48,10 @@ def geometry(
     rm = 0.5 * (r[:-1] + r[1:])  # радиус в середине ячейки по x, (nx, nθ+1)
     dth = float(theta[1] - theta[0])
     vol = dx * dth / 2.0 * 0.25 * (r[:-1, :-1] ** 2 + r[1:, :-1] ** 2 + r[:-1, 1:] ** 2
-                                    + r[1:, 1:] ** 2)  # fmt: skip
-    # Угол нормали к отрезку стенки в сечении: вектор (Δz, Δy) = rm_{j+1} e_{j+1} − rm_j e_j
-    tz = rm[:, 1:] * np.cos(theta[1:]) - rm[:, :-1] * np.cos(theta[:-1])
-    ty = rm[:, 1:] * np.sin(theta[1:]) - rm[:, :-1] * np.sin(theta[:-1])
-    seg = np.hypot(tz, ty)  # длина отрезка стенки в сечении
+                                   + r[1:, 1:] ** 2)  # fmt: skip
+    y, z = rm * np.sin(theta), rm * np.cos(theta)
+    ty, tz = np.diff(y, axis=1), np.diff(z, axis=1)
+    seg = np.hypot(ty, tz)
     nz = ty / np.where(seg > 0, seg, 1.0)  # нормаль (−t_z, t_y)/|t|
     th_mid = 0.5 * (theta[:-1] + theta[1:])
     zc = 2.0 / 3.0 * 0.5 * (rm[:, :-1] + rm[:, 1:]) * np.cos(th_mid)
@@ -69,9 +68,10 @@ def geometry(
 
 
 def _godunov_sq(pm: FloatArray, pp: FloatArray) -> FloatArray:
-    """H(p_−, p_+) = max(p_−, 0)² + min(p_+, 0)² при p_− ≤ p_+, иначе max(p_−², p_+²)."""
-    sq_max = np.maximum(np.maximum(pm, 0.0) ** 2, np.minimum(pp, 0.0) ** 2)
-    sq_min = np.maximum(pm * pm, pp * pp)
+    """p² для ∂r/∂t = V·√(1+p²): max на [p⁻, p⁺] при p⁻ ≤ p⁺, иначе min."""
+    sq_max = np.maximum(pm * pm, pp * pp)
+    straddle = (np.minimum(pm, pp) < 0) & (np.maximum(pm, pp) > 0)
+    sq_min = np.where(straddle, 0.0, np.minimum(pm * pm, pp * pp))
     return np.asarray(np.where(pm <= pp, sq_max, sq_min), dtype=np.float64)
 
 
